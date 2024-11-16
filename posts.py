@@ -1,4 +1,5 @@
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from tabulate import tabulate
 import os
 import praw
 import yfinance as yf
@@ -9,23 +10,17 @@ import sys
 
 
 directory = "trading_bot_data"
-
-# Create the directory if it doesn't exist
 if not os.path.exists(directory):
     os.makedirs(directory)
-    DATA_FILE = os.path.join(directory, "trading_data.json")
-
-
-# File path to save and load data
 DATA_FILE = os.path.join(directory, "trading_data.json")
 
-
 def signal_handler(sig, frame):
-    print("Exiting and saving data...")
+    print("\nExiting and saving data...")
     save_data()
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
+
 def getposts():
     global reddit
     subreddit = reddit.subreddit("wallstreetbets")
@@ -33,76 +28,127 @@ def getposts():
     subreddit3 = reddit.subreddit("stockmarket")
     top_posts = subreddit.new(limit=500)
     top_posts2 = subreddit2.new(limit=500)
-    top_posts3 = subreddit3.new(limit = 500)
-    return top_posts,top_posts2,top_posts3
+    top_posts3 = subreddit3.new(limit=500)
+    return top_posts, top_posts2, top_posts3
 
+def trade(compound_score, positive_score, negative_score):
+    global total_balance, profit_loss 
+    trade_summary = []
 
-def trade(compound_score,positive_score,negative_score):
-   
-    global total_balance
+    total_profit = 0
+    total_loss = 0
+
     for key in compound_score:
-        if compound_score[key] > 1.5:
-            total_balance = total_balance - ticker[key]*2
-            total_stocks[key] = total_stocks[key] + 2
-            print("Current balance after Purchasing",key,total_balance,"$")
-        elif compound_score[key] < 1:
-            if total_stocks[key]>1:
-                total_balance = total_balance + ticker[key]*2
-                total_stocks[key] = total_stocks[key] + -2
-                
-                print("Balance after selling:",key,total_balance,"$")
+        if compound_score[key] > 1.5:  # Buy condition (positive sentiment)
+            total_balance -= ticker[key] * 2
+            total_stocks[key] += 2
+            if key not in profit_loss:
+                profit_loss[key] = {'purchase_price': ticker[key], 'quantity': 2}  # Record purchase price and quantity
             else:
-                print(f"{key}: is currently zero")
-                print("Current Balance",total_balance,"$")
+                profit_loss[key]['quantity'] += 2  # If stock already bought, just increase the quantity
+            trade_summary.append(f"Purchased {key}: New balance = ${total_balance:.2f}")
+        elif compound_score[key] < 1:  # Sell condition (negative sentiment)
+            if total_stocks[key] > 1:
+                total_balance += ticker[key] * 2
+                total_stocks[key] -= 2
 
+                # Calculate profit/loss based on the sale price and the purchase price
+                purchase_price = profit_loss[key]['purchase_price']
+                profit_loss_value = (ticker[key] - purchase_price) * 2  # Profit or loss for 2 stocks sold
+                profit_loss[key]['quantity'] -= 2  # Update the quantity of remaining stocks
+                
+                # Update the total profit/loss
+                if profit_loss_value > 0:
+                    total_profit += profit_loss_value  # Add profit
+                else:
+                    total_loss += abs(profit_loss_value)  # Add loss
 
+    print("\nTrade Execution Summary")
+    for summary in trade_summary:
+        if "Purchased" in summary: 
+            print(summary)
+
+    holdings_table = []
+    total_stock_value = 0 
+    for symbol, quantity in total_stocks.items():
+        if quantity > 0:
+            stock_value = quantity * ticker[symbol]
+            individual_profit_loss = profit_loss.get(symbol, {'purchase_price': 0, 'quantity': 0})
+            holdings_table.append([symbol, quantity, f"${stock_value:.2f}"])
+
+            total_stock_value += stock_value  
+
+    print("\nCurrent Stock Holdings")
+    print(tabulate(holdings_table, headers=["Stock", "Quantity", "Potential Sale Value (USD)"], tablefmt="grid"))
+
+    # Print total value of holdings
+    print(f"\nTotal Value of Current Holdings: ${total_stock_value:.2f}")
+
+    # Print profit and loss separately
+    print(f"\nProfit: ${total_profit:.2f}")
+    print(f"Loss: ${total_loss:.2f}")
+
+    # Now print total profit/loss
+    total_profit_loss = total_profit - total_loss
+    print(f"\nTotal Profit/Loss (All Stocks): ${total_profit_loss:.2f}")
 
 def SentimentAnalyser(new_posts):
-    global compound_score,positive_score,negative_score
+    global compound_score, positive_score, negative_score
     compound_score = {}
     positive_score = {}
     negative_score = {}
-    print("Compound Score of each Stocks!")
+
     for top in new_posts:
-        c = 0
         compound = analyzer.polarity_scores(top.title)
         split = top.title.split()
-        
+        for word in split:
+            if word.lower() in symbols_dict:
+                stock_symbol = symbols_dict[word.lower()]
+                if stock_symbol not in compound_score:
+                    compound_score[stock_symbol] = 0
+                    positive_score[stock_symbol] = 0
+                    negative_score[stock_symbol] = 0
+                compound_score[stock_symbol] += compound['compound']
+                positive_score[stock_symbol] += compound['pos']
+                negative_score[stock_symbol] += compound['neg']
+                ticker[stock_symbol] = 0
 
-        for i in split:
-            if i.lower() in symbols_dict:
-                c=1
-            if c==1:
-               
-                test = symbols_dict[i.lower()]
-                if test not in compound_score:
-                    compound_score[test] = 0
-                    positive_score[test] = 0
-                    negative_score[test] = 0
-                compound_score[test] += compound['compound']
-                positive_score[test] += compound['pos']
-                negative_score[test] += compound['neg']
-                ticker[test]=0
-                print(symbols_dict[i.lower()],compound_score[test]," ")
-            c=0
-    return compound_score,positive_score,negative_score
+    # Prepare and print sentiment score table
+    table_data = [
+        [symbol, compound_score[symbol], positive_score[symbol], negative_score[symbol]]
+        for symbol in compound_score
+    ]
+    print("\nSentiment Scores for each Stock:")
+    print(tabulate(table_data, headers=["Stock", "Compound Score", "Positive Score", "Negative Score"], tablefmt="grid"))
 
+    return compound_score, positive_score, negative_score
+
+# Get today's stock prices
 def getTodayStockPrice():
+    stock_price_table = []
+
     for key in ticker:
         stock = yf.Ticker(key)
         data = stock.history(period="1d")
-        ticker[key] = float(data['Close'].iloc[-1])
+        
+        if not data.empty:
+            ticker[key] = float(data['Close'].iloc[-1])
+            stock_price_table.append([key, f"${ticker[key]:.2f}"])
+        else:
+            stock_price_table.append([key, "No data (may be delisted)"])
 
-    print("Today's Stock Prices:")
-    for price in ticker:
-        print(f"{price}: {ticker[price]}")
+    # Print stock prices table
+    print("\nStock Prices")
+    print(tabulate(stock_price_table, headers=["Stock", "Price (USD)"], tablefmt="grid"))
 
+# Save data to a JSON file
 def save_data():
     try:
         data = {
             "seen_posts": list(seen_posts),
             "total_stocks": total_stocks,
             "total_balance": total_balance,
+            "profit_loss": profit_loss  # Store profit/loss data
         }
         with open(DATA_FILE, 'w') as file:
             json.dump(data, file)
@@ -110,164 +156,80 @@ def save_data():
     except Exception as e:
         print(f"Error saving data: {e}")
 
-
+# Load data from JSON file
 def load_data():
-    global seen_posts, total_stocks, total_balance
+    global seen_posts, total_stocks, total_balance, profit_loss
     try:
         with open(DATA_FILE, 'r') as file:
             data = json.load(file)
             seen_posts = set(data.get("seen_posts", []))
             total_stocks = data.get("total_stocks", total_stocks)
             total_balance = data.get("total_balance", initial_balance)
+            profit_loss = data.get("profit_loss", {})  # Load profit/loss data
         print("Data loaded successfully.")
     except FileNotFoundError:
         print("No saved data found, starting fresh.")
     except Exception as e:
         print(f"Error loading data: {e}")
-
-
-
+# Run the bot
 def runbot():
-    global reddit,seen_posts
+    global reddit, seen_posts
     reddit = praw.Reddit(
-        client_id = 'GJmAuNIY6YqPB0eZHuZMaQ',
-        client_secret = 'yPvM7U74zTXTMF3f9_8I-4rOSGb_oQ',
+        client_id='GJmAuNIY6YqPB0eZHuZMaQ',
+        client_secret='yPvM7U74zTXTMF3f9_8I-4rOSGb_oQ',
         user_agent="posts by elite"
     )
     while True:
-        print("Fetching Posts and analyzing Sentiment")
-        posts1,posts2,posts3 = getposts()
+        print("\nFetching Posts and Analyzing Sentiment...")
+        posts1, posts2, posts3 = getposts()
         new_posts = [post for post in posts1 if post.id not in seen_posts]
-        temp1=[post for post in posts2 if post.id not in seen_posts]
-        temp2 = [post for post in posts3 if post.id not in seen_posts]
-        new_posts.extend(temp1)
-        new_posts.extend(temp2)
-      
+        new_posts.extend([post for post in posts2 if post.id not in seen_posts])
+        new_posts.extend([post for post in posts3 if post.id not in seen_posts])
+
         if new_posts:
-            print("New Posts detected")
-            compound_score,positive_score,negative_score = SentimentAnalyser(new_posts)
-            print("Fetching Today's Stock prices")
+            print("\nNew Posts Detected - Analyzing Sentiment")
+            compound_score, positive_score, negative_score = SentimentAnalyser(new_posts)
+            print("\nFetching Today's Stock Prices")
             getTodayStockPrice()
-            print("Executing Trade")
-            trade(compound_score,positive_score,negative_score)
-            print("Sleeping for 60 seconds")
+            print("\nExecuting Trades Based on Sentiment")
+            trade(compound_score, positive_score, negative_score)
+            print("\nSleeping for 60 seconds...")
             seen_posts.update(post.id for post in new_posts)
             time.sleep(60)
             save_data()
         else:
-            print("No new Posts")
+            print("No New Posts Found, Sleeping for 60 seconds...")
             time.sleep(60)
 
-
+# Stock symbols and other setup variables
 symbols_dict = {
-    "apple": "AAPL", "microsoft": "MSFT", "alphabet (class a)": "GOOGL", "google":"GOOGL",
-    "alphabet (class c)": "GOOG", "amazon": "AMZN", "nvidia": "NVDA",
-    "berkshire hathaway (class b)": "BRK.B", "meta": "META", "tesla": "TSLA",
-    "unitedhealth group": "UNH", "exxon mobil": "XOM", "johnson & johnson": "JNJ",
-    "jpmorgan chase": "JPM", "visa": "V", "procter & gamble": "PG",
-    "eli lilly": "LLY", "mastercard": "MA", "home depot": "HD",
-    "chevron": "CVX", "abbvie": "ABBV", "merck": "MRK",
-    "pepsico": "PEP", "coca-cola": "KO", "pfizer": "PFE",
-    "broadcom": "AVGO", "costco": "COST", "mcdonald's": "MCD",
-    "nvda": "NVDA", "thermo fisher": "TMO", "nike": "NKE",
-    "salesforce": "CRM", "oracle": "ORCL", "t-mobile us": "TMUS",
-    "settle": "SPLK", "abbott": "ABT", "wells fargo": "WFC",
-    "goldman sachs": "GS", "service now": "NOW", "target": "TGT",
-    "caterpillar": "CAT", "honeywell": "HON", "ibm": "IBM",
-    "adobe": "ADBE", "qualcomm": "QCOM", "intuit": "INTU",
-    "airbnb": "ABNB", "boston scientific": "BSX", "paypal": "PYPL",
-    "shopify": "SHOP", "dell technologies": "DELL", "snowflake": "SNOW",
-    "roku": "ROKU", "snap": "SNAP", "twilio": "TWLO",
-    "zoom": "ZM", "okta": "OKTA", "amd": "AMD", "intel": "INTC",'lulu':'LULU','pltr':'PLTR',
-    "aapl": "AAPL",
-    "msft": "MSFT",
-    "googl": "GOOGL",
-    "goog": "GOOG",
-    "amzn": "AMZN",
-    "nvda": "NVDA",
-    "brk.b": "BRK.B",
-    "meta": "META",
-    "tsla": "TSLA",
-    "unh": "UNH",
-    "xom": "XOM",
-    "jnj": "JNJ",
-    "jpm": "JPM",
-    "v": "V",
-    "pg": "PG",
-    "lly": "LLY",
-    "ma": "MA",
-    "hd": "HD",
-    "cvx": "CVX",
-    "abbv": "ABBV",
-    "mrk": "MRK",
-    "pep": "PEP",
-    "ko": "KO",
-    "pfe": "PFE",
-    "avgo": "AVGO",
-    "cost": "COST",
-    "mcd": "MCD",
-    "tmo": "TMO",
-    "nke": "NKE",
-    "crm": "CRM",
-    "orcl": "ORCL",
-    "tmus": "TMUS",
-    "splk": "SPLK",
-    "abt": "ABT",
-    "wfc": "WFC",
-    "gs": "GS",
-    "now": "NOW",
-    "tgt": "TGT",
-    "cat": "CAT",
-    "hon": "HON",
-    "ibm": "IBM",
-    "adbe": "ADBE",
-    "qcom": "QCOM",
-    "intu": "INTU",
-    "abnb": "ABNB",
-    "bsx": "BSX",
-    "pypl": "PYPL",
-    "shop": "SHOP",
-    "dell": "DELL",
-    "snow": "SNOW",
-    "roku": "ROKU",
-    "snap": "SNAP",
-    "twlo": "TWLO",
-    "zm": "ZM",
-    "okta": "OKTA",
-    "amd": "AMD",
-    "intc": "INTC",
-    "lulu": "LULU",
-    "pltr": "PLTR"
+    "apple": "AAPL", "microsoft": "MSFT", "alphabet (class a)": "GOOGL", 
+    "google": "GOOGL", "alphabet (class c)": "GOOG", "amazon": "AMZN", 
+    "nvidia": "NVDA", "berkshire hathaway (class b)": "BRK.B", "meta": "META", 
+    "tesla": "TSLA", "unitedhealth group": "UNH", "exxon mobil": "XOM",
+    "johnson & johnson": "JNJ", "jpmorgan chase": "JPM", "visa": "V", 
+    "procter & gamble": "PG", "eli lilly": "LLY", "mastercard": "MA", 
+    "home depot": "HD", "chevron": "CVX", "abbvie": "ABBV", "merck": "MRK",
+    "pepsico": "PEP", "coca-cola": "KO", "pfizer": "PFE", "broadcom": "AVGO", 
+    "costco": "COST", "mcdonald's": "MCD", "thermo fisher": "TMO", "nike": "NKE",
+    "salesforce": "CRM", "oracle": "ORCL", "t-mobile us": "TMUS", "settle": "SPLK", 
+    "abbott": "ABT", "wells fargo": "WFC", "goldman sachs": "GS", "service now": "NOW", 
+    "target": "TGT", "caterpillar": "CAT", "honeywell": "HON", "ibm": "IBM", 
+    "adobe": "ADBE", "qualcomm": "QCOM", "intuit": "INTU", "airbnb": "ABNB", 
+    "boston scientific": "BSX", "paypal": "PYPL", "shopify": "SHOP", "dell technologies": "DELL",
+    "snowflake": "SNOW", "roku": "ROKU", "snap": "SNAP", "twilio": "TWLO", "zoom": "ZM", 
+    "okta": "OKTA", "amd": "AMD", "intel": "INTC", 'lulu': 'LULU', 'pltr': 'PLTR'
 }
 
-
-
-
-total_stocks = {
-
-
-    'AAPL': 0, 'MSFT': 0, 'GOOGL': 0, 'GOOG': 0, 'AMZN': 0, 'NVDA': 0, 'BRK.B': 0,
-    'META': 0, 'TSLA': 0, 'UNH': 0, 'XOM': 0, 'JNJ': 0, 'JPM': 0, 'V': 0, 'PG': 0,
-    'LLY': 0, 'MA': 0, 'HD': 0, 'CVX': 0, 'ABBV': 0, 'MRK': 0, 'PEP': 0, 'KO': 0,
-    'PFE': 0, 'AVGO': 0, 'COST': 0, 'MCD': 0, 'TMO': 0, 'NKE': 0, 'CRM': 0,
-    'ORCL': 0, 'TMUS': 0, 'SPLK': 0, 'ABT': 0, 'WFC': 0, 'GS': 0, 'NOW': 0, 'TGT': 0,
-    'CAT': 0, 'HON': 0, 'IBM': 0, 'ADBE': 0, 'QCOM': 0, 'INTU': 0, 'ABNB': 0, 'BSX': 0,
-    'PYPL': 0, 'SHOP': 0, 'DELL': 0, 'SNOW': 0, 'ROKU': 0, 'SNAP': 0, 'TWLO': 0, 'ZM': 0,
-    'OKTA': 0, 'AMD': 0, 'INTC': 0, 'LULU': 0, 'PLTR': 0
-
-
-
-}
-
-
+total_stocks = {symbol: 0 for symbol in symbols_dict.values()}
 
 initial_balance = 10000
-netprofit = 0
-dailyprofit = 0
+profit_loss = {}  
+
 total_balance = initial_balance
 analyzer = SentimentIntensityAnalyzer()
-ticker={}
+ticker = {}
 seen_posts = set()
-signal.signal(signal.SIGINT, signal_handler)
+
 load_data()
 runbot()
